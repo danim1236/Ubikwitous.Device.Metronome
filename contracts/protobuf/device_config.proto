@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package ubikwitous.device.config;
+
+import "identity.proto";
+import "camera.proto";
+
+message DeviceConfig {
+
+  ubikwitous.identity.Identity identity = 1;
+
+  int32 fps = 2;
+
+  int32 chunk_duration_sec = 3;
+
+  int32 encoder_bitrate = 4;
+
+  repeated ubikwitous.device.camera.Camera cameras = 5;
+
+}
+

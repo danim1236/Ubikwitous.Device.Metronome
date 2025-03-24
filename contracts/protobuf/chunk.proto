@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package ubikwitous.device.chunk;
+
+import "identity.proto";
+
+message Chunk {
+
+  ubikwitous.identity.Identity identity = 1;
+
+  string camera_id = 2;
+
+  uint64 chunk_index = 3;
+
+  uint64 start_timestamp_ns = 4;
+
+  uint64 end_timestamp_ns = 5;
+
+  int32 frame_count = 6;
+
+  string path = 7;
+
+}
+

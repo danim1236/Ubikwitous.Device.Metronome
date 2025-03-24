@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package ubikwitous.device.camera;
+
+message Camera {
+
+  string camera_id = 1;
+
+  string rtsp_url = 2;
+
+  int32 width = 3;
+
+  int32 height = 4;
+
+}

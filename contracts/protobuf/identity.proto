@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package ubikwitous.identity;
+
+message Identity {
+
+  string tenant_id = 1;
+
+  string site_id = 2;
+
+  string location_id = 3;
+
+  string device_id = 4;
+
+}
