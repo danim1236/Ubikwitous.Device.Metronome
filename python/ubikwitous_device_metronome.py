@@ -2,21 +2,27 @@
 
 import gi
 import time
+import os
 import threading
-gi.require_version("Gst", "1.0")
 
+gi.require_version("Gst", "1.0")
 from gi.repository import Gst, GLib
 
 Gst.init(None)
 
-SEGMENT_DURATION = 30  # segundos
+SEGMENT_DURATION = 30
 
 
-class CameraPipeline:
+class CameraRecorder:
 
     def __init__(self, name, rtsp_url):
+
         self.name = name
         self.rtsp_url = rtsp_url
+
+        self.current_file = None
+        self.segment_index = 0
+        self.lock = threading.Lock()
 
         pipeline_str = f"""
         rtspsrc location={rtsp_url} latency=50 !
@@ -26,18 +32,56 @@ class CameraPipeline:
         nvvideoconvert !
         nvv4l2h264enc iframeinterval=600 insert-sps-pps=true bitrate=4000000 !
         h264parse !
-        splitmuxsink name=mux
-            location={name}_%05d.mp4
-            max-size-time={SEGMENT_DURATION * 1000000000}
+        appsink name=sink emit-signals=true sync=false
         """
 
         self.pipeline = Gst.parse_launch(pipeline_str)
-        self.encoder = self.pipeline.get_by_name("nvv4l2h264enc0")
+
+        self.appsink = self.pipeline.get_by_name("sink")
+        self.appsink.connect("new-sample", self.on_sample)
 
     def start(self):
+
+        self.open_new_chunk()
         self.pipeline.set_state(Gst.State.PLAYING)
 
+    def on_sample(self, sink):
+
+        sample = sink.emit("pull-sample")
+        buffer = sample.get_buffer()
+
+        success, mapinfo = buffer.map(Gst.MapFlags.READ)
+
+        if success:
+
+            with self.lock:
+                if self.current_file:
+                    self.current_file.write(mapinfo.data)
+
+            buffer.unmap(mapinfo)
+
+        return Gst.FlowReturn.OK
+
+    def open_new_chunk(self):
+
+        with self.lock:
+
+            if self.current_file:
+                self.current_file.close()
+
+            filename = f"{self.name}_{self.segment_index:05d}.h264"
+            print("open", filename)
+
+            self.current_file = open(filename, "wb")
+
+            self.segment_index += 1
+
+    def rotate_chunk(self):
+
+        self.open_new_chunk()
+
     def force_keyframe(self):
+
         event = Gst.Event.new_custom(
             Gst.EventType.CUSTOM_DOWNSTREAM,
             Gst.Structure.new_empty("GstForceKeyUnit")
@@ -49,6 +93,7 @@ class CameraPipeline:
 class SegmentScheduler:
 
     def __init__(self, cameras):
+
         self.cameras = cameras
 
     def run(self):
@@ -56,28 +101,43 @@ class SegmentScheduler:
         while True:
 
             now = time.time()
-            next_boundary = (int(now / SEGMENT_DURATION) + 1) * SEGMENT_DURATION
+
+            next_boundary = (
+                int(now / SEGMENT_DURATION) + 1
+            ) * SEGMENT_DURATION
 
             sleep_time = next_boundary - now
+
             time.sleep(sleep_time)
 
-            print("Segment boundary reached")
+            print("SEGMENT BOUNDARY")
 
             for cam in self.cameras:
                 cam.force_keyframe()
 
+            time.sleep(0.05)
+
+            for cam in self.cameras:
+                cam.rotate_chunk()
+
 
 def main():
 
-    cams = [
-        CameraPipeline("cam1", "rtsp://127.0.0.1/stream1"),
-        CameraPipeline("cam2", "rtsp://127.0.0.1/stream2"),
+    cameras = [
+        CameraRecorder(
+            "cam1",
+            "rtsp://127.0.0.1/stream1"
+        ),
+        CameraRecorder(
+            "cam2",
+            "rtsp://127.0.0.1/stream2"
+        ),
     ]
 
-    for cam in cams:
+    for cam in cameras:
         cam.start()
 
-    scheduler = SegmentScheduler(cams)
+    scheduler = SegmentScheduler(cameras)
 
     t = threading.Thread(target=scheduler.run)
     t.daemon = True
@@ -89,5 +149,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
