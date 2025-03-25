@@ -5,7 +5,6 @@ import time
 import socket
 import threading
 import queue
-import struct
 
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst, GLib
@@ -14,10 +13,11 @@ Gst.init(None)
 
 SEGMENT_DURATION = 30
 UDP_PORT = 5005
-WRITE_QUEUE = 200
+WRITE_QUEUE_SIZE = 200
 
 
 def is_idr(data):
+
     for i in range(len(data) - 4):
         if data[i] == 0 and data[i+1] == 0 and data[i+2] == 0 and data[i+3] == 1:
             nal = data[i+4] & 0x1F
@@ -31,36 +31,43 @@ class DiskWriter(threading.Thread):
     def __init__(self, name):
         super().__init__(daemon=True)
         self.name = name
-        self.queue = queue.Queue(WRITE_QUEUE)
+        self.queue = queue.Queue(WRITE_QUEUE_SIZE)
         self.file = None
         self.lock = threading.Lock()
 
-    def open_file(self, ts):
+    def open_file(self, pts):
+
+        filename = f"{self.name}_{pts:.3f}.h264"
+
         with self.lock:
 
             if self.file:
                 self.file.close()
 
-            filename = f"{self.name}_{ts:.3f}.h264"
             print("OPEN", filename)
 
             self.file = open(filename, "wb")
 
     def write(self, data):
+
         try:
             self.queue.put_nowait(data)
         except queue.Full:
             print(self.name, "disk queue overflow")
 
     def run(self):
+
         while True:
+
             data = self.queue.get()
+
             with self.lock:
+
                 if self.file:
                     self.file.write(data)
 
 
-class Camera:
+class CameraPipeline:
 
     def __init__(self, name, url):
 
@@ -72,23 +79,37 @@ class Camera:
         self.writer = DiskWriter(name)
         self.writer.start()
 
-        pipeline = f"""
+        pipeline_desc = f"""
         rtspsrc location={url} latency=80 !
         rtph264depay !
         h264parse !
         nvv4l2decoder !
         nvvideoconvert !
-        nvv4l2h264enc iframeinterval=600 insert-sps-pps=true bitrate=4000000 !
+        queue max-size-buffers=4 leaky=downstream !
+        nvv4l2h264enc insert-sps-pps=true iframeinterval=600
+                      maxperf-enable=1 preset-level=1 bitrate=4000000 !
         h264parse config-interval=-1 !
         appsink name=sink emit-signals=true sync=false
         """
 
-        self.pipeline = Gst.parse_launch(pipeline)
+        self.pipeline = Gst.parse_launch(pipeline_desc)
 
         self.appsink = self.pipeline.get_by_name("sink")
+
         self.appsink.connect("new-sample", self.on_sample)
 
+        encoder = None
+
+        for element in self.pipeline.iterate_elements():
+            if element.get_factory().get_name() == "nvv4l2h264enc":
+                encoder = element
+                break
+
+        self.encoder = encoder
+        self.encoder_sinkpad = encoder.get_static_pad("sink")
+
     def start(self):
+
         self.pipeline.set_state(Gst.State.PLAYING)
 
     def on_sample(self, sink):
@@ -126,18 +147,20 @@ class Camera:
             Gst.Structure.new_empty("GstForceKeyUnit")
         )
 
-        self.pipeline.send_event(event)
+        self.encoder_sinkpad.send_event(event)
 
 
 class SyncReceiver(threading.Thread):
 
     def __init__(self, cameras):
+
         super().__init__(daemon=True)
         self.cameras = cameras
 
     def run(self):
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
         sock.bind(("", UDP_PORT))
 
         while True:
@@ -148,8 +171,8 @@ class SyncReceiver(threading.Thread):
 
                 print("SYNC TICK")
 
-                for c in self.cameras:
-                    c.force_keyframe()
+                for cam in self.cameras:
+                    cam.force_keyframe()
 
 
 class SyncBroadcaster(threading.Thread):
@@ -157,6 +180,7 @@ class SyncBroadcaster(threading.Thread):
     def run(self):
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
         while True:
@@ -167,9 +191,7 @@ class SyncBroadcaster(threading.Thread):
                 int(now / SEGMENT_DURATION) + 1
             ) * SEGMENT_DURATION
 
-            sleep = next_boundary - now
-
-            time.sleep(sleep)
+            time.sleep(next_boundary - now)
 
             sock.sendto(b"TICK", ("255.255.255.255", UDP_PORT))
 
@@ -178,19 +200,19 @@ def main():
 
     cameras = [
 
-        Camera("cam1", "rtsp://127.0.0.1/stream1"),
-        Camera("cam2", "rtsp://127.0.0.1/stream2"),
-        Camera("cam3", "rtsp://127.0.0.1/stream3"),
-        Camera("cam4", "rtsp://127.0.0.1/stream4"),
+        CameraPipeline("cam1", "rtsp://127.0.0.1/stream1"),
+        CameraPipeline("cam2", "rtsp://127.0.0.1/stream2"),
+        CameraPipeline("cam3", "rtsp://127.0.0.1/stream3"),
+        CameraPipeline("cam4", "rtsp://127.0.0.1/stream4"),
 
     ]
 
-    for c in cameras:
-        c.start()
+    for cam in cameras:
+        cam.start()
 
     SyncReceiver(cameras).start()
 
-    # apenas um Jetson deve executar isso
+    # apenas um Jetson executa o broadcaster
     # SyncBroadcaster().start()
 
     loop = GLib.MainLoop()
@@ -199,4 +221,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
