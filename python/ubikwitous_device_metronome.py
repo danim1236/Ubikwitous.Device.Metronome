@@ -93,9 +93,11 @@ class DiskWriter(threading.Thread):
         self.lock = threading.Lock()
         self.first_write = False
 
-    def open_chunk(self, pts):
 
-        filename = f"{self.name}_{pts:.3f}.h264"
+    def open_chunk(self, ts):
+
+        ts = int(ts * 1000)
+        filename = f"chunk_{self.name}_{ts}.h264"
 
         with self.lock:
 
@@ -277,10 +279,10 @@ class CameraEngine:
 
             if self.pending_rotation and is_idr(data):
 
-                pts = buf.pts / Gst.SECOND
-                print(self.name, "ROTATE CHUNK AT", pts)
+                ts = time.time()
+                print(self.name, "ROTATE CHUNK AT", ts)
 
-                self.writer.open_chunk(pts)
+                self.writer.open_chunk(ts)
 
                 self.pending_rotation = False
 
