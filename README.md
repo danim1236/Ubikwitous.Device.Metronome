@@ -1,28 +1,39 @@
 # Ubikwitous.Device.Metronome
 
-Synchronized multi-camera RTSP chunk recorder for H264 streams.
+Synchronized multi-camera RTSP chunk recorder for raw H264 streams.
 
 ## Design goals
 
 - No decoding, encoding, transcoding, or bitstream modification.
+- No keyframe, IDR, GOP, or skip analysis on the edge.
 - Low CPU usage suitable for Raspberry Pi / Jetson Nano.
 - Global chunk synchronization across all cameras.
 - Robust reconnection for long-running edge processes.
+
+## Edge recorder responsibilities
+
+The edge recorder is intentionally limited to:
+
+- RTSP ingest
+- synchronized time-based chunk rotation
+- raw H264 byte-stream writing
+
+Any GOP/keyframe analysis is intentionally deferred to server-side processing.
 
 ## Pipeline
 
 Per camera, the recorder uses exactly:
 
-`rtspsrc protocols=tcp -> rtph264depay -> h264parse -> appsink`
+`rtspsrc protocols=tcp -> rtph264depay -> h264parse -> video/x-h264,stream-format=byte-stream -> appsink`
 
-Each appsink buffer is treated as one frame boundary (provided by `h264parse`) and written directly to disk.
+Each appsink buffer is written directly to the active chunk file in H264 Annex-B byte-stream format.
 
 ## Configuration
 
 Run with:
 
 ```bash
-python recorder.py config.yaml
+python ubikwitous_device_metronome.py config.yaml
 ```
 
 Example `config.yaml`:
@@ -55,18 +66,26 @@ Derived values:
 ## Chunking and filenames
 
 - Scheduler timestamp: `floor(epoch_ms / chunk_duration_ms) * chunk_duration_ms`
-- Active file: `recordings/chunk_{timestamp}_{camera}.tmp`
-- Finalized file: `recordings/chunk_{timestamp}_{camera}_{skip}.h264`
+- Active file: `recordings/chunk_{timestamp_ms}_{camera}.tmp`
+- Finalized file: `recordings/chunk_{timestamp_ms}_{camera}.h264`
 
-`skip` is the number of pre-IDR frames before the first IDR (NAL type 5) appears in the chunk.
+All cameras rotate using the same global scheduler timestamps.
+
+Example output:
+
+- `chunk_1773364980000_cam1.h264`
+- `chunk_1773364980000_cam2.h264`
+- `chunk_1773364980000_cam3.h264`
+- `chunk_1773365010000_cam1.h264`
+- `chunk_1773365010000_cam2.h264`
+- `chunk_1773365010000_cam3.h264`
 
 ## Modules
 
-- `recorder.py` - entrypoint, lifecycle, signal handling.
+- `ubikwitous_device_metronome.py` - entrypoint, lifecycle, signal handling.
 - `config_loader.py` - YAML loading and validation.
 - `scheduler.py` - global chunk rotation broadcaster.
-- `camera_stream.py` - RTSP ingest, frame handling, reconnect.
-- `h264_utils.py` - Annex-B NAL parsing and IDR detection.
+- `camera_stream.py` - RTSP ingest, sample handling, reconnect.
 - `chunk_writer.py` - sequential file writing and finalization.
 
 ## Logging
@@ -80,11 +99,13 @@ The recorder logs:
 - chunk closed
 - reconnect attempts
 
+Chunk close logs include camera and filename only; no keyframe-related fields.
+
 ## Shutdown
 
 On `SIGINT`:
 
 - scheduler stops
 - pipelines transition to `NULL`
-- open `.tmp` files are finalized and renamed
+- open `.tmp` files are finalized and renamed to `.h264`
 - process exits cleanly

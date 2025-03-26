@@ -9,7 +9,6 @@ from typing import Optional
 from gi.repository import Gst
 
 from chunk_writer import ChunkWriter
-from h264_utils import has_idr_nal
 
 
 class CameraStream:
@@ -21,16 +20,13 @@ class CameraStream:
         self._logger = logger
         self._writer = ChunkWriter(output_dir=output_dir, camera_name=name)
 
-        self.current_chunk_timestamp: Optional[int] = None
-        self.skip_count = 0
-        self.first_idr_seen = False
-        self.frame_count = 0
+        self.current_chunk_timestamp = None  # type: Optional[int]
 
         self._lock = threading.Lock()
         self._running = False
         self._connected = False
         self._reconnect_event = threading.Event()
-        self._reconnect_thread = threading.Thread(target=self._reconnect_loop, name=f"reconnect-{name}", daemon=True)
+        self._reconnect_thread = threading.Thread(target=self._reconnect_loop, name="reconnect-{0}".format(name), daemon=True)
 
         self._pipeline = self._build_pipeline()
         self._bus = self._pipeline.get_bus()
@@ -54,7 +50,7 @@ class CameraStream:
 
         self._pipeline.set_state(Gst.State.NULL)
         with self._lock:
-            final_path = self._writer.close_and_finalize(self.skip_count)
+            final_path = self._writer.close_and_finalize()
             if final_path is not None:
                 self._logger.info("chunk closed camera=%s file=%s", self.name, final_path.name)
 
@@ -62,28 +58,25 @@ class CameraStream:
         """Rotate chunk file in global scheduler order."""
         with self._lock:
             if self.current_chunk_timestamp is not None:
-                closed = self._writer.close_and_finalize(self.skip_count)
+                closed = self._writer.close_and_finalize()
                 if closed is not None:
                     self._logger.info("chunk closed camera=%s file=%s", self.name, closed.name)
 
             self._writer.open_chunk(timestamp_ms)
             self.current_chunk_timestamp = timestamp_ms
-            self.skip_count = 0
-            self.first_idr_seen = False
-            self.frame_count = 0
             self._logger.info("chunk started camera=%s ts=%s", self.name, timestamp_ms)
 
     def _build_pipeline(self) -> Gst.Pipeline:
         launch = (
-            f'rtspsrc location="{self.rtsp_url}" protocols=tcp name=src '
-            "! rtph264depay "
-            "! h264parse config-interval=1 "
-            "! video/x-h264,stream-format=byte-stream "
-            "! appsink name=sink emit-signals=true sync=false max-buffers=1 drop=true enable-last-sample=false "
+            'rtspsrc location="{0}" protocols=tcp name=src '.format(self.rtsp_url)
+            + "! rtph264depay "
+            + "! h264parse config-interval=1 "
+            + "! video/x-h264,stream-format=byte-stream "
+            + "! appsink name=sink emit-signals=true sync=false max-buffers=1 drop=true enable-last-sample=false "
         )
         pipeline = Gst.parse_launch(launch)
         if not isinstance(pipeline, Gst.Pipeline):
-            raise RuntimeError(f"Failed to create pipeline for {self.name}")
+            raise RuntimeError("Failed to create pipeline for {0}".format(self.name))
         return pipeline
 
     def _set_pipeline_playing(self) -> None:
@@ -107,19 +100,9 @@ class CameraStream:
         finally:
             buffer.unmap(map_info)
 
-        idr_present = has_idr_nal(frame)
-
         with self._lock:
             if self.current_chunk_timestamp is None:
                 return Gst.FlowReturn.OK
-
-            if not self.first_idr_seen:
-                if idr_present:
-                    self.first_idr_seen = True
-                else:
-                    self.skip_count += 1
-
-            self.frame_count += 1
             self._writer.write_frame(frame)
 
         return Gst.FlowReturn.OK
