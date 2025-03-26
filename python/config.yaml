@@ -1,0 +1,24 @@
+device:
+  role: master        # master ou slave
+  udp_port: 5005
+
+recording:
+  fps: 20
+  chunk_duration: 30
+  bitrate: 4000000
+  width: 1920
+  height: 1080
+
+cameras:
+  - name: cam1
+    rtsp: rtsp://127.0.0.1/stream1
+
+  - name: cam2
+    rtsp: rtsp://127.0.0.1/stream2
+
+  - name: cam3
+    rtsp: rtsp://127.0.0.1/stream3
+
+  - name: cam4
+    rtsp: rtsp://127.0.0.1/stream4
+
