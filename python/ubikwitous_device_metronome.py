@@ -91,6 +91,7 @@ class DiskWriter(threading.Thread):
 
         self.file = None
         self.lock = threading.Lock()
+        self.first_write = False
 
     def open_chunk(self, pts):
 
@@ -101,9 +102,10 @@ class DiskWriter(threading.Thread):
             if self.file:
                 self.file.close()
 
-            print("OPEN", filename)
+            print(f"{self.name} OPEN FILE {filename}")
 
             self.file = open(filename, "wb")
+            self.first_write = False
 
     def push(self, data):
 
@@ -121,6 +123,11 @@ class DiskWriter(threading.Thread):
             with self.lock:
 
                 if self.file:
+
+                    if not self.first_write:
+                        print(self.name, "FIRST FRAME WRITTEN")
+                        self.first_write = True
+
                     self.file.write(data)
 
 
@@ -135,6 +142,11 @@ class CameraEngine:
         self.name = cfg.name
         self.rtsp = cfg.rtsp
 
+        print("\n==============================")
+        print("CAMERA:", self.name)
+        print("RTSP  :", self.rtsp)
+        print("==============================")
+
         self.rec = rec
 
         self.period = 1.0 / rec.fps
@@ -145,6 +157,10 @@ class CameraEngine:
 
         self.pending_rotation = False
 
+        self.decode_count = 0
+        self.encode_count = 0
+        self.last_stat = time.time()
+
         self.writer = DiskWriter(self.name)
         self.writer.start()
 
@@ -153,10 +169,34 @@ class CameraEngine:
 
     # -------------------------------------------------
 
+    def attach_bus_logger(self, pipeline):
+
+        bus = pipeline.get_bus()
+        bus.add_signal_watch()
+
+        def on_message(bus, message):
+
+            t = message.type
+
+            if t == Gst.MessageType.ERROR:
+                err, dbg = message.parse_error()
+                print(f"[{self.name}] GST ERROR:", err, dbg)
+
+            elif t == Gst.MessageType.WARNING:
+                err, dbg = message.parse_warning()
+                print(f"[{self.name}] GST WARNING:", err, dbg)
+
+            elif t == Gst.MessageType.EOS:
+                print(f"[{self.name}] GST EOS")
+
+        bus.connect("message", on_message)
+
+    # -------------------------------------------------
+
     def _build_decode(self):
 
         desc = f"""
-        rtspsrc location={self.rtsp} latency=80 !
+        rtspsrc location={self.rtsp} latency=80 protocols=tcp !
         rtph264depay !
         h264parse !
         nvv4l2decoder !
@@ -167,6 +207,8 @@ class CameraEngine:
 
         self.decode_pipeline = Gst.parse_launch(desc)
 
+        self.attach_bus_logger(self.decode_pipeline)
+
         sink = self.decode_pipeline.get_by_name("dec_sink")
         sink.connect("new-sample", self._on_decode)
 
@@ -174,6 +216,12 @@ class CameraEngine:
 
         sample = sink.emit("pull-sample")
         buf = sample.get_buffer()
+
+        if not hasattr(self, "decode_started"):
+            self.decode_started = True
+            print(self.name, "DECODE STARTED")
+
+        self.decode_count += 1
 
         with self.lock:
             self.latest_buffer = buf.copy()
@@ -199,6 +247,8 @@ class CameraEngine:
 
         self.encode_pipeline = Gst.parse_launch(desc)
 
+        self.attach_bus_logger(self.encode_pipeline)
+
         self.appsrc = self.encode_pipeline.get_by_name("src")
         self.encsink = self.encode_pipeline.get_by_name("enc_sink")
 
@@ -213,6 +263,12 @@ class CameraEngine:
         sample = sink.emit("pull-sample")
         buf = sample.get_buffer()
 
+        if not hasattr(self, "encode_started"):
+            self.encode_started = True
+            print(self.name, "ENCODE STARTED")
+
+        self.encode_count += 1
+
         ok, mapinfo = buf.map(Gst.MapFlags.READ)
 
         if ok:
@@ -222,6 +278,7 @@ class CameraEngine:
             if self.pending_rotation and is_idr(data):
 
                 pts = buf.pts / Gst.SECOND
+                print(self.name, "ROTATE CHUNK AT", pts)
 
                 self.writer.open_chunk(pts)
 
@@ -254,10 +311,14 @@ class CameraEngine:
 
     def start(self):
 
+        print(self.name, "STARTING PIPELINES")
+
         self.decode_pipeline.set_state(Gst.State.PLAYING)
         self.encode_pipeline.set_state(Gst.State.PLAYING)
 
     def force_keyframe(self):
+
+        print(self.name, "FORCE KEYFRAME REQUESTED")
 
         self.pending_rotation = True
 
@@ -285,6 +346,7 @@ class GlobalPacer(threading.Thread):
     def run(self):
 
         pts = 0
+        tick = 0
 
         while True:
 
@@ -294,12 +356,54 @@ class GlobalPacer(threading.Thread):
                 cam.encode_tick(pts)
 
             pts += self.period
+            tick += 1
+
+            if tick % int(5 / self.period) == 0:
+                print("PACER alive")
 
             elapsed = time.time() - start
             sleep = self.period - elapsed
 
             if sleep > 0:
                 time.sleep(sleep)
+
+
+# -------------------------------------------------
+# STATS
+# -------------------------------------------------
+
+class StatsThread(threading.Thread):
+
+    def __init__(self, cameras):
+
+        super().__init__(daemon=True)
+        self.cameras = cameras
+
+    def run(self):
+
+        while True:
+
+            time.sleep(5)
+
+            print("\n===== CAMERA STATS =====")
+
+            for cam in self.cameras:
+
+                now = time.time()
+                dt = now - cam.last_stat
+
+                decode_fps = cam.decode_count / dt
+                encode_fps = cam.encode_count / dt
+
+                print(
+                    f"{cam.name} "
+                    f"decode={decode_fps:.1f}fps "
+                    f"encode={encode_fps:.1f}fps"
+                )
+
+                cam.decode_count = 0
+                cam.encode_count = 0
+                cam.last_stat = now
 
 
 # -------------------------------------------------
@@ -325,6 +429,8 @@ class SyncReceiver(threading.Thread):
             data, _ = sock.recvfrom(1024)
 
             if data == b"TICK":
+
+                print("SYNC TICK RECEIVED")
 
                 for cam in self.cameras:
                     cam.force_keyframe()
@@ -354,6 +460,8 @@ class SyncBroadcaster(threading.Thread):
 
             time.sleep(boundary - now)
 
+            print("SYNC TICK BROADCAST")
+
             sock.sendto(b"TICK", ("255.255.255.255", self.port))
 
 
@@ -378,6 +486,8 @@ def main():
     pacer = GlobalPacer(cameras, rec.fps)
     pacer.start()
 
+    StatsThread(cameras).start()
+
     SyncReceiver(cameras, dev.udp_port).start()
 
     if dev.role == "master":
@@ -389,5 +499,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
