@@ -15,22 +15,18 @@ Chunks MUST be stored using the following directory hierarchy:
 tenant_id /
     site_id /
         location_id /
-            device_id /
-                camera_id /
-                    YYYY /
-                        MM /
-                            DD /
+              YYYY /
+                  MM /
+                      DD /
 
 Example:
 
 ten_1/
    sit_1/
       loc_23/
-         dev_1/
-            cam_1/
-               2026/
-                  03/
-                     05/
+         2026/
+            03/
+               05/
 
 ---
 
@@ -41,24 +37,25 @@ in Unix epoch seconds.
 
 Format:
 
-chunk-{cam}-{timestamp-ms}.h264
+chunk_{cam}_{timestamp-ms}_{skip}.h264
 
 
 Example:
 
-chunk_cam_{1}_1710000030023.h264
+chunk_cam1_1710000030023_3.h264
 
 This file represents a chunk starting at:
 
 1710000030.023 seconds since Unix epoch
 
+and have 3 frames before keyframe
 ---
 
 3. Full Path Example
 
 Example full path:
 
-tenantA/mall1/store23/jetson01/cam01/2026/03/05/1710000030.h264
+tenantA/mall1/store23/2026/03/05/chunk_cam1_1710000030023_3.h264
 
 
 ---
